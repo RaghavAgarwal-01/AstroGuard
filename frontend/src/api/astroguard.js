@@ -1,6 +1,7 @@
 const BASE_URL =
   import.meta.env.VITE_API_BASE_URL ||
   "https://astroguard-pljt.onrender.com/"
+console.log("BASE_URL =", BASE_URL)
 
 const USE_MOCK = false
 
