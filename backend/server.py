@@ -150,7 +150,14 @@ def run_analysis(cached: bool = Query(False, description="Return pre-computed de
         _last_positions = get_current_positions(propagation)
 
         print("[Analysis] Detecting conjunctions...")
-        events = detect_conjunctions(propagation, threshold_km=25.0)
+        events = detect_conjunctions(propagation, threshold_km=200.0)
+
+# ADD THESE 3 LINES:
+        if len(events) == 0:
+            print("[Analysis] No events at 200km, widening to 500km...")
+            events = detect_conjunctions(propagation, threshold_km=500.0)
+
+
         _last_events = events
 
         elapsed = round(time.time() - t_start, 2)

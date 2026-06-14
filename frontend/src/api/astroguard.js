@@ -26,7 +26,7 @@ export async function runAnalysis() {
     await delay(1500)
     return mockEvents
   }
-  const res = await fetch(`${BASE_URL}/api/run-analysis?threshold_km=50`, { method: 'POST' })
+  const res = await fetch(`${BASE_URL}/api/run-analysis`, { method: 'POST' })
   return res.json()
 }
 
