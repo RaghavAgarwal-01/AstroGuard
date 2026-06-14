@@ -1,6 +1,6 @@
 const BASE_URL =
   import.meta.env.VITE_API_BASE_URL ||
-  "https://astroguard-pljt.onrender.com/"
+  "https://astroguard-pljt.onrender.com"
 console.log("BASE_URL =", BASE_URL)
 
 const USE_MOCK = false
@@ -26,7 +26,7 @@ export async function runAnalysis() {
     await delay(1500)
     return mockEvents
   }
-  const res = await fetch(`${BASE_URL}/api/run-analysis`, { method: 'POST' })
+  const res = await fetch(`${BASE_URL}/api/run-analysis?cached=true`, { method: 'POST' })
   return res.json()
 }
 
