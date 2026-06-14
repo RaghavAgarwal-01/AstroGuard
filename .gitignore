@@ -1,0 +1,19 @@
+backend/.env
+# Environment variables
+.env
+*.env
+
+# Python
+__pycache__/
+*.pyc
+
+# Virtual env
+venv/
+.venv/
+
+# Cache
+data/sample_results.json
+
+# OS
+.DS_Store
+Thumbs.db
