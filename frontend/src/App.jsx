@@ -14,19 +14,26 @@ export default function App() {
     fetchSatellites().then(setSatellites)
   }, [])
 
-  async function handleRunAnalysis() {
-    setLoading(true)
-    setSelectedEvent(null)
-    setAiSummary('')
-    try {
-      const data = await runAnalysis()
-      setEvents(data)
-    } catch (err) {
-      console.error('Analysis failed:', err)
-    } finally {
-      setLoading(false)
+async function handleRunAnalysis() {
+  setLoading(true)
+  setSelectedEvent(null)
+  setAiSummary('')
+
+  try {
+    const data = await runAnalysis()
+
+    setEvents(data.events || [])
+
+    if (data.objects) {
+      setSatellites(data.objects)
     }
+
+  } catch (err) {
+    console.error('Analysis failed:', err)
+  } finally {
+    setLoading(false)
   }
+}
 
   async function selectEvent(ev) {
     setSelectedEvent(ev)
