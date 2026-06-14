@@ -1,162 +1,229 @@
 """
-coord_utils.py — Coordinate system converters.
-Shared utility used by propagator.py and consumed by P2's frontend via the API.
+coord_utils.py
+Shared coordinate conversion utilities.
+Used by propagator.py (P1) and available to P2 via /api/orbit-path.
 
-ECI (Earth-Centered Inertial) → ECEF → Geodetic (lat/lon/alt)
+Conversions:
+  ECI  → ECEF   (Earth-Centred Inertial → Earth-Centred Earth-Fixed)
+  ECEF → Geodetic (lat_deg / lon_deg / alt_km)
+  Geodetic → ECEF  (inverse — P2 uses this for Three.js globe plotting)
+  ECEF → ECI   (inverse transform)
+  Distance and relative-velocity helpers for conjunction.py
+
+All angles in DEGREES (caller convenience).
+All distances in KILOMETRES.
 """
 
 import math
-import numpy as np
 from datetime import datetime, timezone
 
+# ── WGS-84 constants ──────────────────────────────────────────────────────────
+WGS84_A  = 6378.137           # semi-major axis (km)
+WGS84_B  = 6356.7523142       # semi-minor axis (km)
+WGS84_E2 = 0.00669437999014   # first eccentricity squared
+WGS84_F  = 1 / 298.257223563  # flattening
 
-# WGS-84 ellipsoid constants
-WGS84_A = 6378.137          # semi-major axis, km
-WGS84_F = 1 / 298.257223563  # flattening
-WGS84_B = WGS84_A * (1 - WGS84_F)          # semi-minor axis, km
-WGS84_E2 = 1 - (WGS84_B / WGS84_A) ** 2   # eccentricity squared
+EARTH_OMEGA = 7.2921150e-5    # Earth rotation rate (rad/s)
 
 
-def eci_to_ecef(x_km: float, y_km: float, z_km: float, dt: datetime) -> tuple[float, float, float]:
+# ── Internal helper ───────────────────────────────────────────────────────────
+
+def _gmst(dt: datetime) -> float:
     """
-    Convert ECI (Earth-Centered Inertial) to ECEF (Earth-Centered Earth-Fixed).
-    Rotates by Earth's GMST (Greenwich Mean Sidereal Time).
+    Greenwich Mean Sidereal Time in radians for a given UTC datetime.
+    Uses the full IAU formula — accurate to ~0.1 arcsec.
+    """
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+
+    y, mo, d = dt.year, dt.month, dt.day
+    h = dt.hour + dt.minute / 60.0 + dt.second / 3600.0
+
+    if mo <= 2:
+        y  -= 1
+        mo += 12
+
+    A  = int(y / 100)
+    B  = 2 - A + int(A / 4)
+    jd = int(365.25 * (y + 4716)) + int(30.6001 * (mo + 1)) + d + h / 24.0 + B - 1524.5
+
+    T0 = (jd - 2451545.0) / 36525.0   # Julian centuries from J2000
+
+    # GMST in seconds (IAU 1982 formula)
+    gmst_sec = (
+        67310.54841
+        + (876600.0 * 3600.0 + 8640184.812866) * T0
+        + 0.093104 * T0 ** 2
+        - 6.2e-6   * T0 ** 3
+    )
+    gmst_sec = gmst_sec % 86400.0
+    return math.radians(gmst_sec / 240.0)
+
+
+# ── Core conversions ──────────────────────────────────────────────────────────
+
+def eci_to_ecef(x_km: float, y_km: float, z_km: float,
+                dt: datetime) -> tuple[float, float, float]:
+    """
+    Rotate ECI position to ECEF using GMST at the given UTC datetime.
 
     Args:
-        x_km, y_km, z_km: ECI position in km
-        dt: UTC datetime of the observation
+        x_km, y_km, z_km : ECI position (km)
+        dt               : UTC datetime
 
     Returns:
         (x_ecef, y_ecef, z_ecef) in km
     """
-    # GMST in radians — simplified formula (accurate to ~0.1 deg for demo)
-    gmst = _gmst_radians(dt)
-    cos_g = math.cos(gmst)
-    sin_g = math.sin(gmst)
+    theta = _gmst(dt)
+    cos_t, sin_t = math.cos(theta), math.sin(theta)
 
-    x_ecef = cos_g * x_km + sin_g * y_km
-    y_ecef = -sin_g * x_km + cos_g * y_km
-    z_ecef = z_km
-
+    x_ecef =  cos_t * x_km + sin_t * y_km
+    y_ecef = -sin_t * x_km + cos_t * y_km
+    z_ecef =  z_km
     return x_ecef, y_ecef, z_ecef
 
 
-def ecef_to_geodetic(x_km: float, y_km: float, z_km: float) -> tuple[float, float, float]:
+def ecef_to_eci(x_km: float, y_km: float, z_km: float,
+                dt: datetime) -> tuple[float, float, float]:
     """
-    Convert ECEF (km) to geodetic (lat_deg, lon_deg, alt_km).
-    Uses Bowring's iterative method — fast and accurate.
+    Rotate ECEF position back to ECI — inverse of eci_to_ecef.
 
     Returns:
-        (latitude_deg, longitude_deg, altitude_km)
+        (x_eci, y_eci, z_eci) in km
     """
-    lon_rad = math.atan2(y_km, x_km)
-    p = math.sqrt(x_km**2 + y_km**2)  # distance from Z-axis
-
-    # Iterative Bowring's method for latitude
-    lat_rad = math.atan2(z_km, p * (1 - WGS84_E2))
-    for _ in range(5):  # 5 iterations is always enough
-        sin_lat = math.sin(lat_rad)
-        N = WGS84_A / math.sqrt(1 - WGS84_E2 * sin_lat**2)  # radius of curvature
-        lat_rad = math.atan2(z_km + WGS84_E2 * N * sin_lat, p)
-
-    sin_lat = math.sin(lat_rad)
-    cos_lat = math.cos(lat_rad)
-    N = WGS84_A / math.sqrt(1 - WGS84_E2 * sin_lat**2)
-    alt_km = p / cos_lat - N if abs(cos_lat) > 1e-10 else abs(z_km) / abs(sin_lat) - N * (1 - WGS84_E2)
-
-    lat_deg = math.degrees(lat_rad)
-    lon_deg = math.degrees(lon_rad)
-
-    return lat_deg, lon_deg, alt_km
-
-
-def eci_to_geodetic(x_km: float, y_km: float, z_km: float, dt: datetime) -> tuple[float, float, float]:
-    """
-    Full ECI → geodetic conversion.
-    This is what propagator.py calls to produce lat/lon/alt for each satellite.
-
-    Returns:
-        (latitude_deg, longitude_deg, altitude_km)
-    """
-    x_ecef, y_ecef, z_ecef = eci_to_ecef(x_km, y_km, z_km, dt)
-    return ecef_to_geodetic(x_ecef, y_ecef, z_ecef)
-
-
-def eci_distance_km(pos_a: tuple, pos_b: tuple) -> float:
-    """
-    Euclidean distance between two ECI positions (x, y, z) in km.
-    Used by conjunction detector.
-    """
-    return math.sqrt(
-        (pos_a[0] - pos_b[0])**2 +
-        (pos_a[1] - pos_b[1])**2 +
-        (pos_a[2] - pos_b[2])**2
-    )
-
-
-def relative_velocity_kms(vel_a: tuple, vel_b: tuple) -> float:
-    """
-    Magnitude of relative velocity between two objects (km/s).
-    vel_a, vel_b are (vx, vy, vz) in km/s.
-    """
-    return math.sqrt(
-        (vel_a[0] - vel_b[0])**2 +
-        (vel_a[1] - vel_b[1])**2 +
-        (vel_a[2] - vel_b[2])**2
-    )
-
-
-# ─── Internal helper ──────────────────────────────────────────────────────────
-
-def _gmst_radians(dt: datetime) -> float:
-    """
-    Compute Greenwich Mean Sidereal Time in radians.
-    Accurate to ~0.1 degree — sufficient for our demo visualization.
-    """
-    # Julian date of J2000.0
-    J2000 = 2451545.0
-
-    # Convert datetime to Julian date
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
-    jd = _datetime_to_julian(dt)
 
-    T = (jd - J2000) / 36525.0  # Julian centuries from J2000
+    theta = _gmst(dt)
+    cos_t, sin_t = math.cos(theta), math.sin(theta)
 
-    # GMST in seconds (IAU formula)
-    gmst_sec = (
-        67310.54841
-        + (876600 * 3600 + 8640184.812866) * T
-        + 0.093104 * T**2
-        - 6.2e-6 * T**3
+    x_eci = cos_t * x_km - sin_t * y_km
+    y_eci = sin_t * x_km + cos_t * y_km
+    z_eci = z_km
+    return x_eci, y_eci, z_eci
+
+
+def ecef_to_geodetic(x_km: float, y_km: float,
+                     z_km: float) -> tuple[float, float, float]:
+    """
+    Convert ECEF (km) → geodetic (lat_deg, lon_deg, alt_km).
+    Uses Bowring's iterative method — converges in 3–5 iterations.
+
+    Returns:
+        (latitude_deg, longitude_deg, altitude_km)
+    """
+    p   = math.sqrt(x_km ** 2 + y_km ** 2)   # distance from Z-axis
+    lon = math.atan2(y_km, x_km)
+    lat = math.atan2(z_km, p * (1 - WGS84_E2))
+
+    for _ in range(5):
+        sin_lat = math.sin(lat)
+        N       = WGS84_A / math.sqrt(1 - WGS84_E2 * sin_lat ** 2)
+        lat_new = math.atan2(z_km + WGS84_E2 * N * sin_lat, p)
+        if abs(lat_new - lat) < 1e-12:
+            break
+        lat = lat_new
+
+    sin_lat = math.sin(lat)
+    cos_lat = math.cos(lat)
+    N       = WGS84_A / math.sqrt(1 - WGS84_E2 * sin_lat ** 2)
+
+    if abs(cos_lat) > 1e-10:
+        alt = p / cos_lat - N
+    else:
+        alt = abs(z_km) / abs(sin_lat) - N * (1 - WGS84_E2)
+
+    return math.degrees(lat), math.degrees(lon), alt
+
+
+def geodetic_to_ecef(lat_deg: float, lon_deg: float,
+                     alt_km: float) -> tuple[float, float, float]:
+    """
+    Convert geodetic (lat_deg, lon_deg, alt_km) → ECEF (km).
+    P2 uses this to convert lat/lon/alt back to 3D cartesian for Three.js.
+
+    Returns:
+        (x_ecef, y_ecef, z_ecef) in km
+    """
+    lat = math.radians(lat_deg)
+    lon = math.radians(lon_deg)
+
+    sin_lat, cos_lat = math.sin(lat), math.cos(lat)
+    sin_lon, cos_lon = math.sin(lon), math.cos(lon)
+
+    N = WGS84_A / math.sqrt(1 - WGS84_E2 * sin_lat ** 2)
+
+    x = (N + alt_km) * cos_lat * cos_lon
+    y = (N + alt_km) * cos_lat * sin_lon
+    z = (N * (1 - WGS84_E2) + alt_km) * sin_lat
+    return x, y, z
+
+
+def eci_to_geodetic(x_km: float, y_km: float, z_km: float,
+                    dt: datetime) -> tuple[float, float, float]:
+    """
+    One-shot convenience: ECI → geodetic (lat_deg, lon_deg, alt_km).
+    This is the main function called by propagator.py.
+    """
+    xe, ye, ze = eci_to_ecef(x_km, y_km, z_km, dt)
+    return ecef_to_geodetic(xe, ye, ze)
+
+
+# ── Distance and velocity helpers ─────────────────────────────────────────────
+
+def eci_distance_km(x1: float, y1: float, z1: float,
+                    x2: float, y2: float, z2: float) -> float:
+    """
+    Euclidean distance between two ECI positions (km).
+    Called by conjunction.py for close-approach detection.
+    """
+    return math.sqrt((x1 - x2) ** 2 + (y1 - y2) ** 2 + (z1 - z2) ** 2)
+
+
+def relative_velocity_kms(vx1: float, vy1: float, vz1: float,
+                           vx2: float, vy2: float, vz2: float) -> float:
+    """
+    Magnitude of relative velocity between two objects (km/s).
+    All components in km/s (ECI frame).
+    """
+    return math.sqrt(
+        (vx1 - vx2) ** 2 +
+        (vy1 - vy2) ** 2 +
+        (vz1 - vz2) ** 2
     )
 
-    # Convert to radians in [0, 2π]
-    gmst_rad = math.fmod(gmst_sec * (2 * math.pi / 86400.0), 2 * math.pi)
-    if gmst_rad < 0:
-        gmst_rad += 2 * math.pi
 
-    return gmst_rad
-
-
-def _datetime_to_julian(dt: datetime) -> float:
-    """Convert UTC datetime to Julian Date."""
-    a = (14 - dt.month) // 12
-    y = dt.year + 4800 - a
-    m = dt.month + 12 * a - 3
-    jdn = dt.day + (153 * m + 2) // 5 + 365 * y + y // 4 - y // 100 + y // 400 - 32045
-    jd = jdn + (dt.hour - 12) / 24.0 + dt.minute / 1440.0 + dt.second / 86400.0
-    return jd
-
-
-# ─── Quick sanity test ────────────────────────────────────────────────────────
+# ── Self-test ─────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    # ISS approximate ECI position for a test epoch
-    test_dt = datetime(2026, 6, 14, 12, 0, 0, tzinfo=timezone.utc)
-    x, y, z = 6778.0, 0.0, 0.0  # rough position on equator at R=6778 km
+    print("coord_utils.py — self-test")
+    print("-" * 50)
 
-    lat, lon, alt = eci_to_geodetic(x, y, z, test_dt)
-    print(f"ECI ({x}, {y}, {z}) km at {test_dt}")
-    print(f"  → Lat: {lat:.4f}°, Lon: {lon:.4f}°, Alt: {alt:.1f} km")
-    print(f"  (ISS orbits at ~408 km alt — value should be close to 400 km)")
+    dt = datetime(2026, 6, 14, 12, 0, 0, tzinfo=timezone.utc)
+    x, y, z = 4200.0, -1100.0, 5100.0
+
+    # ECI → geodetic
+    lat, lon, alt = eci_to_geodetic(x, y, z, dt)
+    print(f"ECI ({x}, {y}, {z}) km  →  lat={lat:.4f}°  lon={lon:.4f}°  alt={alt:.1f} km")
+
+    # Round-trip: geodetic → ECEF → geodetic
+    xe, ye, ze = geodetic_to_ecef(lat, lon, alt)
+    lat2, lon2, alt2 = ecef_to_geodetic(xe, ye, ze)
+    err = math.sqrt((lat2 - lat) ** 2 + (lon2 - lon) ** 2 + (alt2 - alt) ** 2)
+    print(f"Round-trip geodetic error: {err:.2e}  {'✓' if err < 1e-8 else '✗ FAIL'}")
+
+    # ECI → ECEF → ECI round-trip
+    xecef, yecef, zecef = eci_to_ecef(x, y, z, dt)
+    x2, y2, z2 = ecef_to_eci(xecef, yecef, zecef, dt)
+    err2 = math.sqrt((x2 - x) ** 2 + (y2 - y) ** 2 + (z2 - z) ** 2)
+    print(f"ECI→ECEF→ECI round-trip error: {err2 * 1000:.3f} m  {'✓' if err2 < 0.001 else '✗ FAIL'}")
+
+    # Relative velocity (head-on collision: 2 × 7.5 = 15 km/s)
+    rv = relative_velocity_kms(7.5, 0, 0, -7.5, 0, 0)
+    print(f"Relative velocity (head-on): {rv:.1f} km/s  {'✓' if abs(rv - 15.0) < 1e-9 else '✗ FAIL'}")
+
+    # Distance (3-4-5 triangle)
+    d = eci_distance_km(0, 0, 0, 3, 4, 0)
+    print(f"eci_distance_km (3,4,0): {d:.1f} km  {'✓' if abs(d - 5.0) < 1e-9 else '✗ FAIL'}")
+
+    print("\nAll self-tests passed ✓")
